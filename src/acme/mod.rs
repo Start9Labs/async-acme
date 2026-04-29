@@ -142,6 +142,30 @@ pub enum AcmeError {
     NoTlsAlpn01Challenge,
     #[error("HTTP Status {0} indicates error")]
     HttpStatus(u16),
+    /// The ACME server returned `429 Too Many Requests`. When the
+    /// response included a `Retry-After` header (RFC 7231 §7.1.3) the
+    /// parsed cooldown is surfaced here so callers can wait the
+    /// requested duration before retrying instead of hammering the
+    /// server. Both forms the RFC permits are accepted: delta-seconds
+    /// (a non-negative integer) and HTTP-date (resolved to the duration
+    /// from "now" until that moment, or [`Duration::ZERO`] if that
+    /// moment has already passed).
+    ///
+    /// `None` means the server didn't supply a `Retry-After` (or the
+    /// value was unparseable), and the caller should fall back to its
+    /// own default — not that the cooldown is zero.
+    ///
+    /// [`Duration::ZERO`]: std::time::Duration::ZERO
+    #[error(
+        "HTTP Status 429 (Too Many Requests){}",
+        match retry_after {
+            Some(d) => format!(" (Retry-After: {}s)", d.as_secs()),
+            None => String::new(),
+        }
+    )]
+    RateLimited {
+        retry_after: Option<std::time::Duration>,
+    },
     #[cfg(feature = "use_rustls")]
     #[error("Could not create Certificate: {0}")]
     RcgenError(#[from] rcgen::Error),
