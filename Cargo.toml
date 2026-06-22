@@ -50,8 +50,8 @@ use_rustls = [
     "rustls-pemfile",
     "pem",
 ]
-use_async_std = ["async-std", "generic-async-http-client/async-h1"]
-use_tokio = ["tokio/fs", "tokio/io-util", "tokio/time", "generic-async-http-client/hyper"]
+use_async_std = ["async-std", "generic-async-http-client/use_async_h1"]
+use_tokio = ["tokio/fs", "tokio/io-util", "tokio/time", "generic-async-http-client/use_hyper"]
 
 use_openssl = ["openssl", "native-tls"]
 
