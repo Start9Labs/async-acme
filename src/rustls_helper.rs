@@ -230,26 +230,49 @@ mod test {
     use crate::acme::test::{new_dir, return_nounce};
     use crate::test::*;
 
-    async fn respond(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+    async fn respond_with(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<()> {
         stream
             .write_all(
                 format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
-                    body.len(),
-                    body
+                    "HTTP/1.1 {status}\r\nContent-Length: {len}\r\nContent-Type: application/json\r\n\r\n{body}",
+                    len = body.len()
                 )
                 .as_bytes(),
             )
             .await
     }
 
+    async fn respond(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+        respond_with(stream, "200 OK", body).await
+    }
+
     /// Read one JWS request and return its target path.
     async fn take_req(listener: &TcpListener) -> std::io::Result<(TcpStream, String)> {
         return_nounce(listener).await?;
         let (mut stream, _) = listener.accept().await?;
-        let mut buf: Vec<u8> = vec![0; 2048];
-        let r = stream.read(buf.as_mut_slice()).await?;
-        let (header, _, _) = parse_req(buf[0..r].to_vec());
+        // The client may write headers and body separately; read until the
+        // body the headers announce has arrived.
+        let mut req = Vec::new();
+        let mut chunk = [0u8; 2048];
+        loop {
+            let n = stream.read(&mut chunk[..]).await?;
+            assert!(n > 0, "connection closed mid-request");
+            req.extend_from_slice(&chunk[..n]);
+            let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = std::str::from_utf8(&req[..end]).expect("headers not utf8");
+            let len: usize = head
+                .lines()
+                .filter_map(|l| l.split_once(':'))
+                .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, v)| v.trim().parse().ok())
+                .expect("no content-length");
+            if req.len() >= end + 4 + len {
+                break;
+            }
+        }
+        let (header, _, _) = parse_req(req);
         let path = header
             .split_whitespace()
             .nth(1)
@@ -361,6 +384,48 @@ mod test {
                 err.to_string(),
                 "authorization for example.com failed: 192.0.2.1: Timeout during connect (likely firewall problem)"
             );
+
+            assert!(t.await?, "server script did not run to completion");
+            Ok(())
+        });
+    }
+
+    /// Boulder hands a repeat order the same pending order and authorization.
+    /// If the earlier attempt's validation is still running, the trigger is
+    /// refused with 409 — validation is under way, not failed — so the
+    /// authorization is polled as if the trigger had been accepted.
+    #[test]
+    fn a_refused_trigger_is_followed_by_polling() {
+        async fn server(listener: TcpListener, host: String, port: u16) -> std::io::Result<bool> {
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/authz");
+            respond(&mut stream, &pending_authz(&host, port)).await?;
+
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/chall");
+            respond_with(
+                &mut stream,
+                "409 Conflict",
+                r##"{"type":"urn:ietf:params:acme:error:conflict","detail":"Unable to update challenge :: Authorization is already being validated. This may indicate your client attempted the same challenge multiple times, possibly due to a client bug.","status":409}"##,
+            )
+            .await?;
+
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/authz", "a refused trigger is followed by polling");
+            respond(&mut stream, r##"{"status":"valid"}"##).await?;
+
+            close(stream).await?;
+            Ok(true)
+        }
+
+        block_on(async {
+            let (listener, port, host) = listen_somewhere().await?;
+            let directory = new_dir(&host, port);
+            let authz = format!("http://{host}:{port}/authz");
+            let t = spawn(server(listener, host.clone(), port));
+
+            let account = new_account(directory);
+            authorize(&|_, _| Ok(()), &account, &authz).await?;
 
             assert!(t.await?, "server script did not run to completion");
             Ok(())
