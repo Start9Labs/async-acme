@@ -184,14 +184,14 @@ impl Account {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use std::collections::HashMap;
 
     use super::*;
     use crate::acme::test::{new_dir, return_nounce};
     use crate::test::*;
 
-    fn parse_req(
+    pub(crate) fn parse_req(
         req: Vec<u8>,
     ) -> (
         String,
@@ -277,7 +277,7 @@ mod test {
             Ok(())
         });
     }
-    fn new_account(directory: Directory) -> Account {
+    pub(crate) fn new_account(directory: Directory) -> Account {
         let key_pair = EcdsaP256SHA256KeyPair::load(b"0\x81\x87\x02\x01\x000\x13\x06\x07*\x86H\xce=\x02\x01\x06\x08*\x86H\xce=\x03\x01\x07\x04m0k\x02\x01\x01\x04 \x9e!\xcd\x90u\x8d\xba\xe9\xa0-(S\x86\x9aCt\x9c\xcb\xda6Z2\xb8\x9a\xad\xac\x11\n\xb9J\xcei\xa1D\x03B\x00\x04\x834\xd0\xfb\xff\x83D\xfe\xeb\xabn\xb4$\xf5\xe7\xd0\x11\x1cE\xbfK\xb7\x85ZL\x15'\xdfs\x0c\xfb\xdd\xe5\x97|\x93\xf2g\xbd+\xc8\xd0\xaf\xe0\xc1\x88\x16\x99\xde\x9b\xbb\xe4\xb9`_\xe6=\xe2MLP\xa1Ab").unwrap();
         Account {
             key_pair,

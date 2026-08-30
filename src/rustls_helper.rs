@@ -222,3 +222,94 @@ pub enum OrderError {
     #[error("authorization for {0:?} failed too many times")]
     TooManyAttemptsAuth(Identifier),
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::acme::account::test::{new_account, parse_req};
+    use crate::acme::test::{new_dir, return_nounce};
+    use crate::test::*;
+
+    async fn respond(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .as_bytes(),
+            )
+            .await
+    }
+
+    /// Read one JWS request and return its target path.
+    async fn take_req(listener: &TcpListener) -> std::io::Result<(TcpStream, String)> {
+        return_nounce(listener).await?;
+        let (mut stream, _) = listener.accept().await?;
+        let mut buf: Vec<u8> = vec![0; 2048];
+        let r = stream.read(buf.as_mut_slice()).await?;
+        let (header, _, _) = parse_req(buf[0..r].to_vec());
+        let path = header
+            .split_whitespace()
+            .nth(1)
+            .expect("no path in request line")
+            .to_string();
+        Ok((stream, path))
+    }
+
+    /// The authorization stays `pending` while its challenge is `processing`,
+    /// so a client that re-POSTs the challenge on each poll races the
+    /// validation already under way and Boulder rejects it with 409. Pin that
+    /// the challenge is triggered exactly once however long validation takes.
+    #[test]
+    fn challenge_is_triggered_once_while_validation_runs() {
+        async fn server(listener: TcpListener, host: String, port: u16) -> std::io::Result<bool> {
+            // 1. the initial authorization fetch
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/authz");
+            let chall = format!("http://{host}:{port}/chall");
+            let pending = format!(
+                r##"{{"status":"pending","challenges":[{{"token":"t","type":"tls-alpn-01","url":"{chall}"}}],"identifier":{{"type":"dns","value":"example.com"}}}}"##
+            );
+            respond(&mut stream, &pending).await?;
+
+            // 2. the one legitimate trigger
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/chall", "challenge must be triggered first");
+            respond(&mut stream, r##"{"status":"processing"}"##).await?;
+
+            // 3. first poll — still validating. A re-POST would land here.
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(
+                path, "/authz",
+                "poll the authorization; do not re-POST the challenge"
+            );
+            respond(&mut stream, &pending).await?;
+
+            // 4. second poll — validation finished.
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(
+                path, "/authz",
+                "poll the authorization; do not re-POST the challenge"
+            );
+            respond(&mut stream, r##"{"status":"valid"}"##).await?;
+
+            close(stream).await?;
+            Ok(true)
+        }
+
+        block_on(async {
+            let (listener, port, host) = listen_somewhere().await?;
+            let directory = new_dir(&host, port);
+            let authz = format!("http://{host}:{port}/authz");
+            let t = spawn(server(listener, host.clone(), port));
+
+            let account = new_account(directory);
+            authorize(&|_, _| Ok(()), &account, &authz).await?;
+
+            assert!(t.await?, "server script did not run to completion");
+            Ok(())
+        });
+    }
+}

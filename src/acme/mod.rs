@@ -8,7 +8,7 @@ use std::convert::TryInto;
 use std::net::IpAddr;
 use thiserror::Error;
 
-mod account;
+pub(crate) mod account;
 pub use account::Account;
 
 use crate::cache::CacheError;
@@ -188,7 +188,7 @@ fn get_header(response: &Response, header: &'static str) -> Result<String, AcmeE
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
     use crate::test::*;
     #[test]
