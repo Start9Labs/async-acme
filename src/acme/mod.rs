@@ -109,6 +109,7 @@ pub enum Auth {
     },
     Revoked,
     Expired,
+    Deactivated,
 }
 
 impl std::fmt::Display for Auth {
@@ -134,6 +135,7 @@ impl std::fmt::Display for Auth {
             }
             Self::Revoked => f.write_str("authorization was revoked"),
             Self::Expired => f.write_str("authorization has expired"),
+            Self::Deactivated => f.write_str("authorization was deactivated"),
         }
     }
 }
