@@ -2,7 +2,7 @@
 
 ```
 use async_acme::{
-    acme::LETS_ENCRYPT_STAGING_DIRECTORY,
+    acme::{Identifier, LETS_ENCRYPT_STAGING_DIRECTORY},
     rustls_helper::order,
 };
 async fn get_new_cert(){
@@ -10,7 +10,7 @@ async fn get_new_cert(){
     let new_cert = order(
         |_sni, _cert| Ok(()),
         LETS_ENCRYPT_STAGING_DIRECTORY,
-        &vec!["example.com".to_string()],
+        &[Identifier::Dns("example.com".to_string())],
         Some(&cache),
         &vec!["mailto:admin@example.com".to_string()],
     )
