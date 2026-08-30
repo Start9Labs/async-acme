@@ -151,27 +151,41 @@ async fn authorize<F>(set_auth_key: &F, account: &Account, url: &str) -> Result<
 where
     F: Fn(Identifier, CertifiedKey) -> Result<(), AcmeError>,
 {
-    let (identifier, challenge_url) = match account.check_auth(url).await? {
+    let identifier = match account.check_auth(url).await? {
         Auth::Pending {
             identifier,
             challenges,
         } => {
-            log::info!("trigger challenge for {identifier:?}");
+            log::info!("trigger challenge for {identifier}");
             let (challenge, key_auth) = account.tls_alpn_01(&challenges)?;
             let auth_key = gen_acme_cert(vec![identifier.clone()], key_auth.as_ref())?;
             set_auth_key(identifier.clone(), auth_key)?;
-            account.trigger_challenge(&challenge.url).await?;
-            (identifier, challenge.url.clone())
+            // Boulder answers a new order for an identifier set it already
+            // holds a pending order for with that same order, hence the same
+            // authorization. If an earlier attempt's validation is still
+            // running, the trigger gets 409 `conflict` (its beganProcessing
+            // guard): validation is under way, so poll rather than fail.
+            match account.trigger_challenge(&challenge.url).await {
+                Ok(()) => {}
+                Err(AcmeError::HttpStatus(409)) => {
+                    log::warn!("challenge for {identifier} is already being validated; polling")
+                }
+                Err(e) => return Err(e.into()),
+            }
+            identifier
         }
         Auth::Valid => return Ok(()),
         auth => return Err(OrderError::BadAuth(auth)),
     };
+    // RFC 8555 §7.5.1: the challenge is triggered once and the client then
+    // polls the authorization. It stays `pending` for as long as its challenge
+    // is `processing`, so a re-POST here would race the validation the server
+    // is already performing and be rejected with 409.
     for i in 0u8..5 {
         sleep(Duration::from_secs(1u64 << i)).await;
         match account.check_auth(url).await? {
             Auth::Pending { .. } => {
-                log::info!("authorization for {identifier:?} still pending");
-                account.trigger_challenge(&challenge_url).await?
+                log::info!("authorization for {identifier} still pending")
             }
             Auth::Valid => return Ok(()),
             auth => return Err(OrderError::BadAuth(auth)),
