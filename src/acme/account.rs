@@ -400,7 +400,9 @@ pub(crate) mod test {
                 _ => panic!("wrong variant"),
             };
             assert_eq!(i, "id");
-            let Challenge { typ, url, token } = c.first().expect("no challange");
+            let Challenge {
+                typ, url, token, ..
+            } = c.first().expect("no challange");
             assert_eq!(*typ, ChallengeType::TlsAlpn01);
             assert_eq!(url, "http://example.com/bla");
             assert_eq!(token, "t");

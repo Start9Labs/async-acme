@@ -97,12 +97,45 @@ pub enum Auth {
     },
     /// ownership is proven
     Valid,
+    /// a challenge failed; the reason is that challenge's [`Challenge::error`]
     Invalid {
+        /// host that could not be authenticated
+        identifier: Identifier,
+        #[serde(default)]
+        challenges: Vec<Challenge>,
+        /// RFC 8555 §7.1.4 defines no `error` here, but keep whatever a server sends
         #[serde(default)]
         error: Value,
     },
     Revoked,
     Expired,
+}
+
+impl std::fmt::Display for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending { identifier, .. } => {
+                write!(f, "authorization for {identifier} is pending")
+            }
+            Self::Valid => f.write_str("authorization is valid"),
+            Self::Invalid {
+                identifier,
+                challenges,
+                error,
+            } => {
+                write!(f, "authorization for {identifier} failed")?;
+                if let Some(problem) = challenges.iter().find_map(|c| c.error.as_ref()) {
+                    write!(f, ": {problem}")
+                } else if !error.is_null() {
+                    write!(f, ": {error}")
+                } else {
+                    Ok(())
+                }
+            }
+            Self::Revoked => f.write_str("authorization was revoked"),
+            Self::Expired => f.write_str("authorization has expired"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -120,12 +153,47 @@ impl std::fmt::Display for Identifier {
     }
 }
 
+/// State of a [`Challenge`] (RFC 8555 §7.1.6)
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ChallengeStatus {
+    Pending,
+    Processing,
+    Valid,
+    Invalid,
+}
+
+/// Problem document (RFC 7807) an ACME server attaches to a failed challenge (RFC 8555 §6.7)
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct Problem {
+    #[serde(rename = "type", default)]
+    pub typ: String,
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+impl std::fmt::Display for Problem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.detail.as_deref() {
+            Some(detail) => f.write_str(detail),
+            None if self.typ.is_empty() => f.write_str("no detail given"),
+            None => f.write_str(&self.typ),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Challenge {
     #[serde(rename = "type")]
     pub typ: ChallengeType,
     pub url: String,
     pub token: String,
+    /// RFC 8555 §8; `None` if the server omitted it
+    #[serde(default)]
+    pub status: Option<ChallengeStatus>,
+    /// why validation failed, set once `status` is `invalid` (RFC 8555 §8)
+    #[serde(default)]
+    pub error: Option<Problem>,
 }
 
 #[derive(Error, Debug)]

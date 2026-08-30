@@ -217,9 +217,9 @@ pub enum OrderError {
     Rcgen(#[from] rcgen::Error),
     #[error("bad order object: {0:?}")]
     BadOrder(Order),
-    #[error("bad auth object: {0:?}")]
+    #[error("{0}")]
     BadAuth(Auth),
-    #[error("authorization for {0:?} failed too many times")]
+    #[error("authorization for {0} failed too many times")]
     TooManyAttemptsAuth(Identifier),
 }
 
@@ -258,6 +258,12 @@ mod test {
         Ok((stream, path))
     }
 
+    fn pending_authz(host: &str, port: u16) -> String {
+        format!(
+            r##"{{"status":"pending","challenges":[{{"token":"t","type":"tls-alpn-01","url":"http://{host}:{port}/chall"}}],"identifier":{{"type":"dns","value":"example.com"}}}}"##
+        )
+    }
+
     /// The authorization stays `pending` while its challenge is `processing`,
     /// so a client that re-POSTs the challenge on each poll races the
     /// validation already under way and Boulder rejects it with 409. Pin that
@@ -268,10 +274,7 @@ mod test {
             // 1. the initial authorization fetch
             let (mut stream, path) = take_req(&listener).await?;
             assert_eq!(path, "/authz");
-            let chall = format!("http://{host}:{port}/chall");
-            let pending = format!(
-                r##"{{"status":"pending","challenges":[{{"token":"t","type":"tls-alpn-01","url":"{chall}"}}],"identifier":{{"type":"dns","value":"example.com"}}}}"##
-            );
+            let pending = pending_authz(&host, port);
             respond(&mut stream, &pending).await?;
 
             // 2. the one legitimate trigger
@@ -307,6 +310,57 @@ mod test {
 
             let account = new_account(directory);
             authorize(&|_, _| Ok(()), &account, &authz).await?;
+
+            assert!(t.await?, "server script did not run to completion");
+            Ok(())
+        });
+    }
+
+    /// A failed validation names the reason the server attached to the
+    /// challenge (RFC 8555 §8), not merely that the authorization is invalid.
+    #[test]
+    fn a_failed_validation_reports_the_servers_reason() {
+        async fn server(listener: TcpListener, host: String, port: u16) -> std::io::Result<bool> {
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/authz");
+            respond(&mut stream, &pending_authz(&host, port)).await?;
+
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/chall");
+            respond(&mut stream, r##"{"status":"processing"}"##).await?;
+
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/authz");
+            respond(
+                &mut stream,
+                &format!(
+                    r##"{{"status":"invalid","identifier":{{"type":"dns","value":"example.com"}},"challenges":[{{"type":"tls-alpn-01","status":"invalid","url":"http://{host}:{port}/chall","token":"t","validated":"2026-08-30T01:07:38Z","error":{{"type":"urn:ietf:params:acme:error:connection","detail":"192.0.2.1: Timeout during connect (likely firewall problem)","status":400}}}}]}}"##
+                ),
+            )
+            .await?;
+
+            close(stream).await?;
+            Ok(true)
+        }
+
+        block_on(async {
+            let (listener, port, host) = listen_somewhere().await?;
+            let directory = new_dir(&host, port);
+            let authz = format!("http://{host}:{port}/authz");
+            let t = spawn(server(listener, host.clone(), port));
+
+            let account = new_account(directory);
+            let err = authorize(&|_, _| Ok(()), &account, &authz)
+                .await
+                .expect_err("the authorization is invalid");
+            assert!(
+                matches!(err, OrderError::BadAuth(Auth::Invalid { .. })),
+                "{err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "authorization for example.com failed: 192.0.2.1: Timeout during connect (likely firewall problem)"
+            );
 
             assert!(t.await?, "server script did not run to completion");
             Ok(())
