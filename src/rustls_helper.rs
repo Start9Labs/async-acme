@@ -2,7 +2,7 @@
 
 ```
 use async_acme::{
-    acme::LETS_ENCRYPT_STAGING_DIRECTORY,
+    acme::{Identifier, LETS_ENCRYPT_STAGING_DIRECTORY},
     rustls_helper::order,
 };
 async fn get_new_cert(){
@@ -10,7 +10,7 @@ async fn get_new_cert(){
     let new_cert = order(
         |_sni, _cert| Ok(()),
         LETS_ENCRYPT_STAGING_DIRECTORY,
-        &vec!["example.com".to_string()],
+        &[Identifier::Dns("example.com".to_string())],
         Some(&cache),
         &vec!["mailto:admin@example.com".to_string()],
     )
@@ -151,27 +151,41 @@ async fn authorize<F>(set_auth_key: &F, account: &Account, url: &str) -> Result<
 where
     F: Fn(Identifier, CertifiedKey) -> Result<(), AcmeError>,
 {
-    let (identifier, challenge_url) = match account.check_auth(url).await? {
+    let identifier = match account.check_auth(url).await? {
         Auth::Pending {
             identifier,
             challenges,
         } => {
-            log::info!("trigger challenge for {identifier:?}");
+            log::info!("trigger challenge for {identifier}");
             let (challenge, key_auth) = account.tls_alpn_01(&challenges)?;
             let auth_key = gen_acme_cert(vec![identifier.clone()], key_auth.as_ref())?;
             set_auth_key(identifier.clone(), auth_key)?;
-            account.trigger_challenge(&challenge.url).await?;
-            (identifier, challenge.url.clone())
+            // Boulder answers a new order for an identifier set it already
+            // holds a pending order for with that same order, hence the same
+            // authorization. If an earlier attempt's validation is still
+            // running, the trigger gets 409 `conflict` (its beganProcessing
+            // guard): validation is under way, so poll rather than fail.
+            match account.trigger_challenge(&challenge.url).await {
+                Ok(()) => {}
+                Err(AcmeError::HttpStatus(409)) => {
+                    log::warn!("challenge for {identifier} is already being validated; polling")
+                }
+                Err(e) => return Err(e.into()),
+            }
+            identifier
         }
         Auth::Valid => return Ok(()),
         auth => return Err(OrderError::BadAuth(auth)),
     };
+    // RFC 8555 §7.5.1: the challenge is triggered once and the client then
+    // polls the authorization. It stays `pending` for as long as its challenge
+    // is `processing`, so a re-POST here would race the validation the server
+    // is already performing and be rejected with 409.
     for i in 0u8..5 {
         sleep(Duration::from_secs(1u64 << i)).await;
         match account.check_auth(url).await? {
             Auth::Pending { .. } => {
-                log::info!("authorization for {identifier:?} still pending");
-                account.trigger_challenge(&challenge_url).await?
+                log::info!("authorization for {identifier} still pending")
             }
             Auth::Valid => return Ok(()),
             auth => return Err(OrderError::BadAuth(auth)),
@@ -203,8 +217,218 @@ pub enum OrderError {
     Rcgen(#[from] rcgen::Error),
     #[error("bad order object: {0:?}")]
     BadOrder(Order),
-    #[error("bad auth object: {0:?}")]
+    #[error("{0}")]
     BadAuth(Auth),
-    #[error("authorization for {0:?} failed too many times")]
+    #[error("authorization for {0} failed too many times")]
     TooManyAttemptsAuth(Identifier),
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::acme::account::test::{new_account, parse_req};
+    use crate::acme::test::{new_dir, return_nounce};
+    use crate::test::*;
+
+    async fn respond_with(stream: &mut TcpStream, status: &str, body: &str) -> std::io::Result<()> {
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {len}\r\nContent-Type: application/json\r\n\r\n{body}",
+                    len = body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+    }
+
+    async fn respond(stream: &mut TcpStream, body: &str) -> std::io::Result<()> {
+        respond_with(stream, "200 OK", body).await
+    }
+
+    /// Read one JWS request and return its target path.
+    async fn take_req(listener: &TcpListener) -> std::io::Result<(TcpStream, String)> {
+        return_nounce(listener).await?;
+        let (mut stream, _) = listener.accept().await?;
+        // The client may write headers and body separately; read until the
+        // body the headers announce has arrived.
+        let mut req = Vec::new();
+        let mut chunk = [0u8; 2048];
+        loop {
+            let n = stream.read(&mut chunk[..]).await?;
+            assert!(n > 0, "connection closed mid-request");
+            req.extend_from_slice(&chunk[..n]);
+            let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") else {
+                continue;
+            };
+            let head = std::str::from_utf8(&req[..end]).expect("headers not utf8");
+            let len: usize = head
+                .lines()
+                .filter_map(|l| l.split_once(':'))
+                .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, v)| v.trim().parse().ok())
+                .expect("no content-length");
+            if req.len() >= end + 4 + len {
+                break;
+            }
+        }
+        let (header, _, _) = parse_req(req);
+        let path = header
+            .split_whitespace()
+            .nth(1)
+            .expect("no path in request line")
+            .to_string();
+        Ok((stream, path))
+    }
+
+    fn pending_authz(host: &str, port: u16) -> String {
+        format!(
+            r##"{{"status":"pending","challenges":[{{"token":"t","type":"tls-alpn-01","url":"http://{host}:{port}/chall"}}],"identifier":{{"type":"dns","value":"example.com"}}}}"##
+        )
+    }
+
+    /// The authorization stays `pending` while its challenge is `processing`,
+    /// so a client that re-POSTs the challenge on each poll races the
+    /// validation already under way and Boulder rejects it with 409. Pin that
+    /// the challenge is triggered exactly once however long validation takes.
+    #[test]
+    fn challenge_is_triggered_once_while_validation_runs() {
+        async fn server(listener: TcpListener, host: String, port: u16) -> std::io::Result<bool> {
+            // 1. the initial authorization fetch
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/authz");
+            let pending = pending_authz(&host, port);
+            respond(&mut stream, &pending).await?;
+
+            // 2. the one legitimate trigger
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/chall", "challenge must be triggered first");
+            respond(&mut stream, r##"{"status":"processing"}"##).await?;
+
+            // 3. first poll — still validating. A re-POST would land here.
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(
+                path, "/authz",
+                "poll the authorization; do not re-POST the challenge"
+            );
+            respond(&mut stream, &pending).await?;
+
+            // 4. second poll — validation finished.
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(
+                path, "/authz",
+                "poll the authorization; do not re-POST the challenge"
+            );
+            respond(&mut stream, r##"{"status":"valid"}"##).await?;
+
+            close(stream).await?;
+            Ok(true)
+        }
+
+        block_on(async {
+            let (listener, port, host) = listen_somewhere().await?;
+            let directory = new_dir(&host, port);
+            let authz = format!("http://{host}:{port}/authz");
+            let t = spawn(server(listener, host.clone(), port));
+
+            let account = new_account(directory);
+            authorize(&|_, _| Ok(()), &account, &authz).await?;
+
+            assert!(t.await?, "server script did not run to completion");
+            Ok(())
+        });
+    }
+
+    /// A failed validation names the reason the server attached to the
+    /// challenge (RFC 8555 §8), not merely that the authorization is invalid.
+    #[test]
+    fn a_failed_validation_reports_the_servers_reason() {
+        async fn server(listener: TcpListener, host: String, port: u16) -> std::io::Result<bool> {
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/authz");
+            respond(&mut stream, &pending_authz(&host, port)).await?;
+
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/chall");
+            respond(&mut stream, r##"{"status":"processing"}"##).await?;
+
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/authz");
+            respond(
+                &mut stream,
+                &format!(
+                    r##"{{"status":"invalid","identifier":{{"type":"dns","value":"example.com"}},"challenges":[{{"type":"tls-alpn-01","status":"invalid","url":"http://{host}:{port}/chall","token":"t","validated":"2026-08-30T01:07:38Z","error":{{"type":"urn:ietf:params:acme:error:connection","detail":"192.0.2.1: Timeout during connect (likely firewall problem)","status":400}}}}]}}"##
+                ),
+            )
+            .await?;
+
+            close(stream).await?;
+            Ok(true)
+        }
+
+        block_on(async {
+            let (listener, port, host) = listen_somewhere().await?;
+            let directory = new_dir(&host, port);
+            let authz = format!("http://{host}:{port}/authz");
+            let t = spawn(server(listener, host.clone(), port));
+
+            let account = new_account(directory);
+            let err = authorize(&|_, _| Ok(()), &account, &authz)
+                .await
+                .expect_err("the authorization is invalid");
+            assert!(
+                matches!(err, OrderError::BadAuth(Auth::Invalid { .. })),
+                "{err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "authorization for example.com failed: 192.0.2.1: Timeout during connect (likely firewall problem)"
+            );
+
+            assert!(t.await?, "server script did not run to completion");
+            Ok(())
+        });
+    }
+
+    /// Boulder hands a repeat order the same pending order and authorization.
+    /// If the earlier attempt's validation is still running, the trigger is
+    /// refused with 409 — validation is under way, not failed — so the
+    /// authorization is polled as if the trigger had been accepted.
+    #[test]
+    fn a_refused_trigger_is_followed_by_polling() {
+        async fn server(listener: TcpListener, host: String, port: u16) -> std::io::Result<bool> {
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/authz");
+            respond(&mut stream, &pending_authz(&host, port)).await?;
+
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/chall");
+            respond_with(
+                &mut stream,
+                "409 Conflict",
+                r##"{"type":"urn:ietf:params:acme:error:conflict","detail":"Unable to update challenge :: Authorization is already being validated. This may indicate your client attempted the same challenge multiple times, possibly due to a client bug.","status":409}"##,
+            )
+            .await?;
+
+            let (mut stream, path) = take_req(&listener).await?;
+            assert_eq!(path, "/authz", "a refused trigger is followed by polling");
+            respond(&mut stream, r##"{"status":"valid"}"##).await?;
+
+            close(stream).await?;
+            Ok(true)
+        }
+
+        block_on(async {
+            let (listener, port, host) = listen_somewhere().await?;
+            let directory = new_dir(&host, port);
+            let authz = format!("http://{host}:{port}/authz");
+            let t = spawn(server(listener, host.clone(), port));
+
+            let account = new_account(directory);
+            authorize(&|_, _| Ok(()), &account, &authz).await?;
+
+            assert!(t.await?, "server script did not run to completion");
+            Ok(())
+        });
+    }
 }
