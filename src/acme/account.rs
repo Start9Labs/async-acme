@@ -1,3 +1,4 @@
+use futures_timer::Delay;
 use std::time::Duration;
 
 use serde_json::json;
@@ -115,7 +116,7 @@ impl Account {
             .and_then(|s| s.parse().ok())
         {
             log::info!("Received Retry-After header, waiting {retry} seconds...");
-            tokio::time::sleep(Duration::from_secs(retry)).await;
+            Delay::new(Duration::from_secs(retry)).await;
         }
         Ok(res)
     }
@@ -228,9 +229,7 @@ pub(crate) mod test {
         async fn server(listener: TcpListener, host: String, port: u16) -> std::io::Result<bool> {
             return_nounce(&listener).await?;
             let (mut stream, _) = listener.accept().await?;
-            let mut req: Vec<u8> = vec![0; 1024];
-            let r = stream.read(req.as_mut_slice()).await?;
-            let (header, payload, protected) = parse_req(req[0..r].to_vec());
+            let (header, payload, protected) = parse_req(read_http_request(&mut stream).await?);
             let payload = payload.expect("no payload");
             assert!(header.starts_with("POST /acme/new-acct HTTP"));
 
@@ -290,9 +289,7 @@ pub(crate) mod test {
         async fn server(listener: TcpListener) -> std::io::Result<bool> {
             return_nounce(&listener).await?;
             let (mut stream, _) = listener.accept().await?;
-            let mut req: Vec<u8> = vec![0; 1024];
-            let r = stream.read(req.as_mut_slice()).await?;
-            let (header, payload, _) = parse_req(req[0..r].to_vec());
+            let (header, payload, _) = parse_req(read_http_request(&mut stream).await?);
             let payload = payload.expect("no payload");
 
             assert!(header.starts_with("POST /acme/new-order HTTP"));
@@ -350,10 +347,7 @@ pub(crate) mod test {
         async fn server(listener: TcpListener) -> std::io::Result<bool> {
             return_nounce(&listener).await?;
             let (mut stream, _) = listener.accept().await?;
-            let mut req: Vec<u8> = vec![0; 1024];
-            let r = stream.read(req.as_mut_slice()).await?;
-
-            let (header, payload, _) = parse_req(req[0..r].to_vec());
+            let (header, payload, _) = parse_req(read_http_request(&mut stream).await?);
 
             assert!(payload.is_none());
             assert!(header.starts_with("POST /check_auth HTTP"));
@@ -366,10 +360,7 @@ pub(crate) mod test {
 
             return_nounce(&listener).await?;
             let (mut stream, _) = listener.accept().await?;
-            let mut req: Vec<u8> = vec![0; 1024];
-            let r = stream.read(req.as_mut_slice()).await?;
-
-            let (header, payload, _) = parse_req(req[0..r].to_vec());
+            let (header, payload, _) = parse_req(read_http_request(&mut stream).await?);
 
             assert!(payload.is_none());
             assert!(header.starts_with("POST /check_auth HTTP"));
@@ -420,9 +411,7 @@ pub(crate) mod test {
         async fn server(listener: TcpListener) -> std::io::Result<bool> {
             return_nounce(&listener).await?;
             let (mut stream, _) = listener.accept().await?;
-            let mut req: Vec<u8> = vec![0; 1024];
-            let r = stream.read(req.as_mut_slice()).await?;
-            let (header, payload, _) = parse_req(req[0..r].to_vec());
+            let (header, payload, _) = parse_req(read_http_request(&mut stream).await?);
             let payload = payload.expect("no payload");
 
             assert!(header.starts_with("POST /csr HTTP"));

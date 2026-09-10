@@ -18,3 +18,7 @@ jobs:
     - uses: actions/checkout@v2
     - name: Build
       run: cargo build --verbose
+    - name: Check rustls certificate helpers
+      run: cargo check --no-default-features --features rustls_certificates --verbose
+    - name: Test with Hyper and native TLS
+      run: cargo test --no-default-features --features hyper_native_tls --verbose

@@ -21,6 +21,7 @@ async fn get_new_cert(){
 
 */
 
+use futures_timer::Delay;
 use futures_util::future::try_join_all;
 use rustls::{
     pki_types::{pem::PemObject, CertificateDer},
@@ -35,15 +36,12 @@ use crate::{
     crypto::{gen_acme_cert, get_cert_duration_left, CertBuilder},
 };
 
-#[cfg(feature = "use_async_std")]
-use async_std::task::sleep;
-#[cfg(feature = "use_tokio")]
-use tokio::time::sleep;
-
-/// Obtain a signed certificate from the ACME provider at `directory_url` for the DNS `domains`.
+/// Obtain a signed certificate from the ACME provider at `directory_url`.
 ///
-/// The secret for the challenge is passed as a ready to use certificate to `set_auth_key(domain, certificate)?`.
-/// This certificate has to be presented upon a TLS request with ACME ALPN and SNI for that domain.
+/// The callback receives a TLS-ALPN-01 certificate for each identifier requiring validation.
+/// Present it while negotiating `acme-tls/1`. Select DNS certificates with matching SNI. RFC 8738
+/// validators send an IP address's reverse-mapping name as SNI, so select IP certificates using
+/// that name.
 ///
 /// Provide your email in `contact` in the form *mailto:admin@example.com* to receive warnings regarding your certificate.
 /// Set a `cache` to remember your account.
@@ -95,10 +93,12 @@ where
     Ok(c)
 }
 
-/// Obtain a signed certificate for the DNS `domains` using `account`.
+/// Obtain a signed certificate using `account`.
 ///
-/// The secret for the challenge is passed as a ready to use certificate to `set_auth_key(domain, certificate)?`.
-/// This certificate has to be presented upon a TLS request with ACME ALPN and SNI for that domain.
+/// The callback receives a TLS-ALPN-01 certificate for each identifier requiring validation.
+/// Present it while negotiating `acme-tls/1`. Select DNS certificates with matching SNI. RFC 8738
+/// validators send an IP address's reverse-mapping name as SNI, so select IP certificates using
+/// that name.
 ///
 /// Returns the signed Certificate, its private key as pem, and the certificate as pem again
 pub async fn drive_order<F>(
@@ -182,7 +182,7 @@ where
     // is `processing`, so a re-POST here would race the validation the server
     // is already performing and be rejected with 409.
     for i in 0u8..5 {
-        sleep(Duration::from_secs(1u64 << i)).await;
+        Delay::new(Duration::from_secs(1u64 << i)).await;
         match account.check_auth(url).await? {
             Auth::Pending { .. } => {
                 log::info!("authorization for {identifier} still pending")
@@ -212,7 +212,7 @@ pub fn duration_until_renewal_attempt(cert_key: Option<&CertifiedKey>, err_cnt: 
 pub enum OrderError {
     #[error("acme error: {0}")]
     Acme(#[from] AcmeError),
-    #[cfg(feature = "use_rustls")]
+    #[cfg(feature = "rustls_certificates")]
     #[error("certificate generation error: {0}")]
     Rcgen(#[from] rcgen::Error),
     #[error("bad order object: {0:?}")]
@@ -250,29 +250,7 @@ mod test {
     async fn take_req(listener: &TcpListener) -> std::io::Result<(TcpStream, String)> {
         return_nounce(listener).await?;
         let (mut stream, _) = listener.accept().await?;
-        // The client may write headers and body separately; read until the
-        // body the headers announce has arrived.
-        let mut req = Vec::new();
-        let mut chunk = [0u8; 2048];
-        loop {
-            let n = stream.read(&mut chunk[..]).await?;
-            assert!(n > 0, "connection closed mid-request");
-            req.extend_from_slice(&chunk[..n]);
-            let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") else {
-                continue;
-            };
-            let head = std::str::from_utf8(&req[..end]).expect("headers not utf8");
-            let len: usize = head
-                .lines()
-                .filter_map(|l| l.split_once(':'))
-                .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-                .and_then(|(_, v)| v.trim().parse().ok())
-                .expect("no content-length");
-            if req.len() >= end + 4 + len {
-                break;
-            }
-        }
-        let (header, _, _) = parse_req(req);
+        let (header, _, _) = parse_req(read_http_request(&mut stream).await?);
         let path = header
             .split_whitespace()
             .nth(1)

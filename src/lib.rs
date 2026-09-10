@@ -43,8 +43,8 @@ pub mod cache;
 mod crypto;
 mod jose;
 
-#[cfg(feature = "use_rustls")]
-#[cfg_attr(docsrs, doc(cfg(feature = "use_rustls")))]
+#[cfg(feature = "rustls_certificates")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rustls_certificates")))]
 pub mod rustls_helper;
 
 #[cfg(test)]
@@ -95,6 +95,40 @@ pub(crate) mod test {
         #[cfg(feature = "use_async_std")]
         stream.shutdown(async_std::net::Shutdown::Both)?;
         Ok(())
+    }
+
+    pub(crate) async fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 2048];
+        loop {
+            let read = stream.read(&mut chunk).await?;
+            if read == 0 {
+                return Err(std::io::ErrorKind::UnexpectedEof.into());
+            }
+            request.extend_from_slice(&chunk[..read]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = std::str::from_utf8(&request[..header_end])
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "missing or invalid Content-Length",
+                    )
+                })?;
+            let request_length = header_end + 4 + content_length;
+            if request.len() >= request_length {
+                request.truncate(request_length);
+                return Ok(request);
+            }
+        }
     }
 
     pub(crate) async fn assert_stream(

@@ -1,5 +1,5 @@
 use async_acme::{
-    acme::{AcmeError, ACME_TLS_ALPN_NAME, LETS_ENCRYPT_STAGING_DIRECTORY},
+    acme::{AcmeError, Identifier, ACME_TLS_ALPN_NAME, LETS_ENCRYPT_STAGING_DIRECTORY},
     rustls_helper::{duration_until_renewal_attempt, order},
 };
 use async_std::io::prelude::WriteExt;
@@ -48,7 +48,7 @@ fn main() {
         uri: LETS_ENCRYPT_STAGING_DIRECTORY.to_string(),
         contact: vec!["mailto:admin@example.com".to_string()],
         cache_dir: None,
-        dns_names: vec!["example.com".to_string()],
+        identifiers: vec![Identifier::Dns("example.com".to_string())],
     };
     task::spawn(async move {
         task.acme_watcher().await;
@@ -69,8 +69,7 @@ struct AcmeTaskRunner {
     contact: Vec<String>,
     /// to store acme auth (and certs)
     cache_dir: Option<PathBuf>,
-    /// dns to proof
-    dns_names: Vec<String>,
+    identifiers: Vec<Identifier>,
 }
 pub struct ResolveServerCert {
     cert: RwLock<Option<Arc<CertifiedKey>>>,
@@ -99,9 +98,9 @@ impl AcmeTaskRunner {
                 sleep(d).await;
             }
             match order(
-                |k, v| self.set_auth_key(k, v),
+                |k, v| self.set_auth_key(k.to_string(), v),
                 &self.uri,
-                &self.dns_names,
+                &self.identifiers,
                 self.cache_dir.as_ref(),
                 &self.contact,
             )

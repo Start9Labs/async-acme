@@ -236,7 +236,7 @@ pub enum AcmeError {
     RateLimited {
         retry_after: Option<std::time::Duration>,
     },
-    #[cfg(feature = "use_rustls")]
+    #[cfg(feature = "rustls_certificates")]
     #[error("Could not create Certificate: {0}")]
     RcgenError(#[from] rcgen::Error),
     #[error("error from cache: {0}")]
