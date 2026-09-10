@@ -212,7 +212,7 @@ pub fn duration_until_renewal_attempt(cert_key: Option<&CertifiedKey>, err_cnt: 
 pub enum OrderError {
     #[error("acme error: {0}")]
     Acme(#[from] AcmeError),
-    #[cfg(feature = "use_rustls")]
+    #[cfg(feature = "rustls_certificates")]
     #[error("certificate generation error: {0}")]
     Rcgen(#[from] rcgen::Error),
     #[error("bad order object: {0:?}")]

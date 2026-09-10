@@ -43,8 +43,8 @@ pub mod cache;
 mod crypto;
 mod jose;
 
-#[cfg(feature = "use_rustls")]
-#[cfg_attr(docsrs, doc(cfg(feature = "use_rustls")))]
+#[cfg(feature = "rustls_certificates")]
+#[cfg_attr(docsrs, doc(cfg(feature = "rustls_certificates")))]
 pub mod rustls_helper;
 
 #[cfg(test)]
