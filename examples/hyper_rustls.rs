@@ -1,5 +1,5 @@
 use async_acme::{
-    acme::{AcmeError, ACME_TLS_ALPN_NAME, LETS_ENCRYPT_STAGING_DIRECTORY},
+    acme::{AcmeError, Identifier, ACME_TLS_ALPN_NAME, LETS_ENCRYPT_STAGING_DIRECTORY},
     rustls_helper::{duration_until_renewal_attempt, order},
 };
 use tokio::time::sleep;
@@ -122,10 +122,16 @@ impl AcmeTaskRunner {
                 log::info!("next renewal attempt in {}s", d.as_secs());
                 sleep(d).await;
             }
+            let identifiers = self
+                .dns_names
+                .iter()
+                .cloned()
+                .map(Identifier::Dns)
+                .collect::<Vec<_>>();
             match order(
-                |k, v| self.set_auth_key(k, v),
+                |k, v| self.set_auth_key(k.to_string(), v),
                 &self.uri,
-                &self.dns_names,
+                &identifiers,
                 self.cache_dir.as_ref(),
                 &self.contact,
             )

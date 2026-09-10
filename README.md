@@ -19,6 +19,7 @@ You need to specify via features what crates are used in the actual work.
 |---|---|
 |use_tokio | Use [tokio](https://crates.io/crates/tokio) as async runtime|
 |use_async_std | Use [async_std](https://crates.io/crates/async_std) as async runtime|
+|rustls_certificates | Enable rustls certificate generation helpers; select a runtime and HTTP transport separately|
 |use_rustls | Use rustls with public WebPKI roots for HTTPS and generate rustls certificates|
 |hyper_native_tls | Use Hyper with platform-native TLS roots for HTTPS and generate rustls certificates. Requires `default-features = false`|
 |hyper_rustls | `use_rustls`+`use_tokio` ![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/User65k/async-acme/example_hyper_rustls.yml) |
@@ -26,6 +27,7 @@ You need to specify via features what crates are used in the actual work.
 
 Without anything specified you will end up with *no async backend selected* or *no crypto backend selected*.
 If you use this crate for a library, please [reexport](https://doc.rust-lang.org/cargo/reference/features.html#dependency-features) the appropriate features.
+The `use_rustls` and `hyper_native_tls` HTTP transports are mutually exclusive across Cargo's unified feature set.
 
 Select native TLS without the default rustls transport:
 

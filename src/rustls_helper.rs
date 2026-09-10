@@ -21,6 +21,7 @@ async fn get_new_cert(){
 
 */
 
+use futures_timer::Delay;
 use futures_util::future::try_join_all;
 use rustls::{
     pki_types::{pem::PemObject, CertificateDer},
@@ -34,11 +35,6 @@ use crate::{
     cache::AcmeCache,
     crypto::{gen_acme_cert, get_cert_duration_left, CertBuilder},
 };
-
-#[cfg(feature = "use_async_std")]
-use async_std::task::sleep;
-#[cfg(feature = "use_tokio")]
-use tokio::time::sleep;
 
 /// Obtain a signed certificate from the ACME provider at `directory_url` for the DNS `domains`.
 ///
@@ -182,7 +178,7 @@ where
     // is `processing`, so a re-POST here would race the validation the server
     // is already performing and be rejected with 409.
     for i in 0u8..5 {
-        sleep(Duration::from_secs(1u64 << i)).await;
+        Delay::new(Duration::from_secs(1u64 << i)).await;
         match account.check_auth(url).await? {
             Auth::Pending { .. } => {
                 log::info!("authorization for {identifier} still pending")
@@ -250,29 +246,7 @@ mod test {
     async fn take_req(listener: &TcpListener) -> std::io::Result<(TcpStream, String)> {
         return_nounce(listener).await?;
         let (mut stream, _) = listener.accept().await?;
-        // The client may write headers and body separately; read until the
-        // body the headers announce has arrived.
-        let mut req = Vec::new();
-        let mut chunk = [0u8; 2048];
-        loop {
-            let n = stream.read(&mut chunk[..]).await?;
-            assert!(n > 0, "connection closed mid-request");
-            req.extend_from_slice(&chunk[..n]);
-            let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") else {
-                continue;
-            };
-            let head = std::str::from_utf8(&req[..end]).expect("headers not utf8");
-            let len: usize = head
-                .lines()
-                .filter_map(|l| l.split_once(':'))
-                .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-                .and_then(|(_, v)| v.trim().parse().ok())
-                .expect("no content-length");
-            if req.len() >= end + 4 + len {
-                break;
-            }
-        }
-        let (header, _, _) = parse_req(req);
+        let (header, _, _) = parse_req(read_http_request(&mut stream).await?);
         let path = header
             .split_whitespace()
             .nth(1)
