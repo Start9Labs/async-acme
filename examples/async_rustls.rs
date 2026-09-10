@@ -48,7 +48,7 @@ fn main() {
         uri: LETS_ENCRYPT_STAGING_DIRECTORY.to_string(),
         contact: vec!["mailto:admin@example.com".to_string()],
         cache_dir: None,
-        dns_names: vec!["example.com".to_string()],
+        identifiers: vec![Identifier::Dns("example.com".to_string())],
     };
     task::spawn(async move {
         task.acme_watcher().await;
@@ -69,8 +69,7 @@ struct AcmeTaskRunner {
     contact: Vec<String>,
     /// to store acme auth (and certs)
     cache_dir: Option<PathBuf>,
-    /// dns to proof
-    dns_names: Vec<String>,
+    identifiers: Vec<Identifier>,
 }
 pub struct ResolveServerCert {
     cert: RwLock<Option<Arc<CertifiedKey>>>,
@@ -98,16 +97,10 @@ impl AcmeTaskRunner {
                 log::info!("next renewal attempt in {}s", d.as_secs());
                 sleep(d).await;
             }
-            let identifiers = self
-                .dns_names
-                .iter()
-                .cloned()
-                .map(Identifier::Dns)
-                .collect::<Vec<_>>();
             match order(
                 |k, v| self.set_auth_key(k.to_string(), v),
                 &self.uri,
-                &identifiers,
+                &self.identifiers,
                 self.cache_dir.as_ref(),
                 &self.contact,
             )

@@ -58,4 +58,5 @@ These query certs from Let's Encrypt's Staging endpoint.
 In order for them to work you need to change the email and domain from `example.com` to your own.
 
 1. Hyper server with rustls: `cargo run --example hyper_rustls --features="hyper_rustls"`
-2. async-std server with rustls: `cargo run --example async_rustls --features="async_std_rustls"`
+2. Hyper server with native TLS for ACME requests: `cargo run --no-default-features --example hyper_native_tls --features="hyper_native_tls"`
+3. async-std server with rustls: `cargo run --example async_rustls --features="async_std_rustls"`

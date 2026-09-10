@@ -52,7 +52,7 @@ async fn main() {
         uri: LETS_ENCRYPT_STAGING_DIRECTORY.to_string(),
         contact: vec!["mailto:admin@example.com".to_string()],
         cache_dir: None,
-        dns_names: vec!["example.com".to_string()],
+        identifiers: vec![Identifier::Dns("example.com".to_string())],
     };
     tokio::spawn(async move {
         task.acme_watcher().await;
@@ -62,8 +62,9 @@ async fn main() {
     let addr = "0.0.0.0:443";
     let tcp = TcpListener::bind(&addr).await.expect("bind failed");
     let tls_acceptor = Arc::new(TlsAcceptor::from(tls_cfg));
-    // Prepare a long-running future stream to accept and serve clients.
-    while let Ok((stream, _)) = tcp.accept().await {
+    println!("Starting to serve on https://{}.", addr);
+    loop {
+        let (stream, _) = tcp.accept().await.expect("accept failed");
         let tls_acceptor = tls_acceptor.clone();
         tokio::spawn(async move {
             let stream = tls_acceptor.accept(stream).await.expect("tls handshake");
@@ -73,9 +74,6 @@ async fn main() {
                 .expect("serve_connection");
         });
     }
-
-    // Run the future, keep going until an error occurs.
-    println!("Starting to serve on https://{}.", addr);
 }
 struct AcmeTaskRunner {
     /// resolver to update with a new cert
@@ -86,8 +84,7 @@ struct AcmeTaskRunner {
     contact: Vec<String>,
     /// to store acme auth (and certs)
     cache_dir: Option<PathBuf>,
-    /// dns to proof
-    dns_names: Vec<String>,
+    identifiers: Vec<Identifier>,
 }
 
 #[derive(Default)]
@@ -117,16 +114,10 @@ impl AcmeTaskRunner {
                 log::info!("next renewal attempt in {}s", d.as_secs());
                 sleep(d).await;
             }
-            let identifiers = self
-                .dns_names
-                .iter()
-                .cloned()
-                .map(Identifier::Dns)
-                .collect::<Vec<_>>();
             match order(
                 |k, v| self.set_auth_key(k.to_string(), v),
                 &self.uri,
-                &identifiers,
+                &self.identifiers,
                 self.cache_dir.as_ref(),
                 &self.contact,
             )
