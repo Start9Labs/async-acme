@@ -50,7 +50,11 @@ rustls_certificates = [
     "rcgen/ring",
     "rustls-pemfile",
 ]
-use_rustls = ["rustls_certificates", "generic-async-http-client/rustls"]
+use_rustls = [
+    "rustls_certificates",
+    "rustls/logging",
+    "generic-async-http-client/rustls",
+]
 use_async_std = ["async-std", "generic-async-http-client/use_async_h1"]
 use_tokio = ["tokio/fs", "tokio/io-util", "tokio/time", "generic-async-http-client/use_hyper"]
 

@@ -4,9 +4,10 @@ use async_acme::{
 };
 use tokio::time::sleep;
 
-use hyper::{
-    service::service_fn,
-    body::Incoming as Body, Method, Request, Response, StatusCode,
+use hyper::{body::Incoming as Body, service::service_fn, Method, Request, Response, StatusCode};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto,
 };
 use std::{
     collections::HashMap,
@@ -23,10 +24,6 @@ use tokio_rustls::{
         ServerConfig,
     },
     TlsAcceptor,
-};
-use hyper_util::{
-    rt::{TokioExecutor, TokioIo},
-    server::conn::auto,
 };
 
 #[tokio::main]
@@ -71,11 +68,9 @@ async fn main() {
         tokio::spawn(async move {
             let stream = tls_acceptor.accept(stream).await.expect("tls handshake");
             auto::Builder::new(TokioExecutor::new())
-                .serve_connection(
-                    TokioIo::new(stream),
-                        service_fn(echo),
-                    )
-                    .await.expect("serve_connection");
+                .serve_connection(TokioIo::new(stream), service_fn(echo))
+                .await
+                .expect("serve_connection");
         });
     }
 
