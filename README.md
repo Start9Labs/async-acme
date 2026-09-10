@@ -23,9 +23,9 @@ You need to specify via features what crates are used in the actual work.
 |use_rustls | Use rustls with public WebPKI roots for HTTPS and generate rustls certificates|
 |hyper_native_tls | Use Hyper with platform-native TLS roots for HTTPS and generate rustls certificates. Requires `default-features = false`|
 |hyper_rustls | `use_rustls`+`use_tokio` ![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/User65k/async-acme/example_hyper_rustls.yml) |
-|async_std_rustls | `use_rustls`+`use_async_std` ![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/User65k/async-acme/example_async_std_rustls.yml)|
+|async_std_rustls | `use_rustls`+`use_async_std`. Requires `default-features = false` ![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/User65k/async-acme/example_async_std_rustls.yml)|
 
-Without anything specified you will end up with *no async backend selected* or *no crypto backend selected*.
+When disabling default features, select both an async runtime and an HTTP/TLS backend.
 If you use this crate for a library, please [reexport](https://doc.rust-lang.org/cargo/reference/features.html#dependency-features) the appropriate features.
 The `use_rustls` and `hyper_native_tls` HTTP transports are mutually exclusive across Cargo's unified feature set.
 
@@ -45,7 +45,7 @@ I wrote a [webserver](https://github.com/User65k/flash_rust_ws) based on hyper a
 A crate I found did what I needed but used async-h1 and async-std. While that worked, it did increase the binary size and number of crates I depend on by a good amount.
 
 So I wrote this. You can specify which backend to use.
-In the Webserver case, using `--features="hyper_rustls"` (same dependencies) instead of `--features="async_std_rustls"` lead to 81 less crates and a 350kB smaller binary.
+In the Webserver case, using `--features="hyper_rustls"` (same dependencies) instead of `--no-default-features --features="async_std_rustls"` led to 81 fewer crates and a 350kB smaller binary.
 Using:
 ```
 [profile.release]
@@ -59,4 +59,4 @@ In order for them to work you need to change the email and domain from `example.
 
 1. Hyper server with rustls: `cargo run --example hyper_rustls --features="hyper_rustls"`
 2. Hyper server with native TLS for ACME requests: `cargo run --no-default-features --example hyper_native_tls --features="hyper_native_tls"`
-3. async-std server with rustls: `cargo run --example async_rustls --features="async_std_rustls"`
+3. async-std server with rustls: `cargo run --no-default-features --example async_rustls --features="async_std_rustls"`

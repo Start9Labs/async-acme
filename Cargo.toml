@@ -41,6 +41,7 @@ async-std = { version = "1.9.0", optional = true }
 tokio = { version = "1.6", optional = true }
 
 [features]
+pem = []
 rustls_certificates = [
     "rustls",
     "rustls/logging",

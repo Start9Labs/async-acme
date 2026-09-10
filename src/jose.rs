@@ -113,8 +113,7 @@ mod tests {
         // parser is strict about day-of-week matching the date.
         let target = SystemTime::now() + Duration::from_secs(3600);
         let header = httpdate::fmt_http_date(target);
-        let parsed = parse_retry_after(&header)
-            .expect("formatted future HTTP-date should parse");
+        let parsed = parse_retry_after(&header).expect("formatted future HTTP-date should parse");
         // We don't pin the exact value (it depends on "now" inside
         // `parse_retry_after`), just bracket it generously.
         assert!(parsed > Duration::from_secs(60 * 30));

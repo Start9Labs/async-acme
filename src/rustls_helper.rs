@@ -36,10 +36,12 @@ use crate::{
     crypto::{gen_acme_cert, get_cert_duration_left, CertBuilder},
 };
 
-/// Obtain a signed certificate from the ACME provider at `directory_url` for the DNS `domains`.
+/// Obtain a signed certificate from the ACME provider at `directory_url`.
 ///
-/// The secret for the challenge is passed as a ready to use certificate to `set_auth_key(domain, certificate)?`.
-/// This certificate has to be presented upon a TLS request with ACME ALPN and SNI for that domain.
+/// The callback receives a TLS-ALPN-01 certificate for each identifier requiring validation.
+/// Present it while negotiating `acme-tls/1`. Select DNS certificates with matching SNI. RFC 8738
+/// validators send an IP address's reverse-mapping name as SNI, so select IP certificates using
+/// that name.
 ///
 /// Provide your email in `contact` in the form *mailto:admin@example.com* to receive warnings regarding your certificate.
 /// Set a `cache` to remember your account.
@@ -91,10 +93,12 @@ where
     Ok(c)
 }
 
-/// Obtain a signed certificate for the DNS `domains` using `account`.
+/// Obtain a signed certificate using `account`.
 ///
-/// The secret for the challenge is passed as a ready to use certificate to `set_auth_key(domain, certificate)?`.
-/// This certificate has to be presented upon a TLS request with ACME ALPN and SNI for that domain.
+/// The callback receives a TLS-ALPN-01 certificate for each identifier requiring validation.
+/// Present it while negotiating `acme-tls/1`. Select DNS certificates with matching SNI. RFC 8738
+/// validators send an IP address's reverse-mapping name as SNI, so select IP certificates using
+/// that name.
 ///
 /// Returns the signed Certificate, its private key as pem, and the certificate as pem again
 pub async fn drive_order<F>(
