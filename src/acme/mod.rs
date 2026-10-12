@@ -165,7 +165,7 @@ pub enum ChallengeStatus {
     Invalid,
 }
 
-/// Problem document (RFC 7807) an ACME server attaches to a failed challenge (RFC 8555 §6.7)
+/// Problem document (RFC 7807) returned by an ACME server (RFC 8555 §6.7).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct Problem {
     #[serde(rename = "type", default)]
@@ -227,14 +227,20 @@ pub enum AcmeError {
     ///
     /// [`Duration::ZERO`]: std::time::Duration::ZERO
     #[error(
-        "HTTP Status 429 (Too Many Requests){}",
+        "HTTP Status 429 (Too Many Requests){}{}",
         match retry_after {
             Some(d) => format!(" (Retry-After: {}s)", d.as_secs()),
+            None => String::new(),
+        },
+        match problem {
+            Some(problem) => format!(": {problem}"),
             None => String::new(),
         }
     )]
     RateLimited {
         retry_after: Option<std::time::Duration>,
+        /// Server-provided explanation, including any remediation link.
+        problem: Option<Problem>,
     },
     #[cfg(feature = "use_rustls")]
     #[error("Could not create Certificate: {0}")]

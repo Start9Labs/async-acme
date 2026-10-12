@@ -1,4 +1,4 @@
-use crate::acme::AcmeError;
+use crate::acme::{AcmeError, Problem};
 use crate::crypto::{sha256, EcdsaP256SHA256KeyPair};
 use crate::B64_URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -43,13 +43,6 @@ pub async fn jose_req(
     let mut response = req.exec().await?;
     if response.status_code() > 299 {
         let status = response.status_code();
-        // For `429 Too Many Requests` we capture `Retry-After` before
-        // reading/discarding the body so the caller can honour the
-        // server-supplied cooldown instead of guessing a backoff. Both
-        // forms permitted by RFC 7231 §7.1.3 are accepted: delta-seconds
-        // (a non-negative integer) and HTTP-date (IMF-fixdate / obs-date).
-        // An HTTP-date in the past, or any unparseable value, is reported
-        // as `None` so callers can fall back to a sensible default.
         let retry_after = if status == 429 {
             Some(
                 response
@@ -60,13 +53,21 @@ pub async fn jose_req(
         } else {
             None
         };
-        if let Ok(s) = response.text().await {
-            log::error!("{}: HTTP {} - {}", url, status, s);
-        } else {
-            log::error!("{}: HTTP {}", url, status);
-        }
+        let problem = match response.text().await {
+            Ok(body) => {
+                log::error!("{}: HTTP {} - {}", url, status, body);
+                serde_json::from_str::<Problem>(&body).ok()
+            }
+            Err(_) => {
+                log::error!("{}: HTTP {}", url, status);
+                None
+            }
+        };
         return Err(match retry_after {
-            Some(retry_after) => AcmeError::RateLimited { retry_after },
+            Some(retry_after) => AcmeError::RateLimited {
+                retry_after,
+                problem,
+            },
             None => AcmeError::HttpStatus(status),
         });
     }
@@ -98,7 +99,121 @@ fn parse_retry_after(s: &str) -> Option<std::time::Duration> {
 mod tests {
     use std::time::{Duration, SystemTime};
 
-    use super::parse_retry_after;
+    use super::{jose_req, parse_retry_after};
+    use crate::acme::AcmeError;
+    use crate::crypto::EcdsaP256SHA256KeyPair;
+    use crate::test::block_on;
+
+    fn request_error(status: u16, body: &str, retry_after: Option<&str>) -> AcmeError {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/new-order", listener.local_addr().unwrap());
+        let retry_after = retry_after
+            .map(|value| format!("Retry-After: {value}\r\n"))
+            .unwrap_or_default();
+        let response = format!(
+            "HTTP/1.1 {status} Error\r\nContent-Length: {}\r\nContent-Type: application/problem+json\r\n{retry_after}Connection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse().unwrap();
+                }
+            }
+            reader.read_exact(&mut vec![0; content_length]).unwrap();
+            reader.get_mut().write_all(response.as_bytes()).unwrap();
+        });
+        let mut error = None;
+        block_on(async {
+            let pkcs8 = EcdsaP256SHA256KeyPair::generate().unwrap();
+            let key = EcdsaP256SHA256KeyPair::load(pkcs8.as_ref()).unwrap();
+            error = Some(jose_req(&key, None, "nonce", &url, "{}").await.unwrap_err());
+            Ok(())
+        });
+        server.join().unwrap();
+        error.unwrap()
+    }
+
+    #[test]
+    fn rate_limit_preserves_unpause_link() {
+        let body = r#"{"type":"urn:ietf:params:acme:error:rateLimited","detail":"Your account is temporarily prevented from requesting certificates for example.test. Please visit: https://portal.letsencrypt.org/sfe/v1/unpause?jwt=test-token","status":429}"#;
+        let error = request_error(429, body, None);
+        let AcmeError::RateLimited {
+            retry_after,
+            problem,
+        } = &error
+        else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(*retry_after, None);
+        assert_eq!(
+            problem.as_ref().unwrap().typ,
+            "urn:ietf:params:acme:error:rateLimited"
+        );
+        assert!(error
+            .to_string()
+            .contains("https://portal.letsencrypt.org/sfe/v1/unpause?jwt=test-token"));
+    }
+
+    #[test]
+    fn rate_limit_preserves_detail_and_retry_after() {
+        let error = request_error(429, r#"{"detail":"Try again later"}"#, Some("120"));
+        let AcmeError::RateLimited { retry_after, .. } = &error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(*retry_after, Some(Duration::from_secs(120)));
+        assert_eq!(
+            error.to_string(),
+            "HTTP Status 429 (Too Many Requests) (Retry-After: 120s): Try again later"
+        );
+    }
+
+    #[test]
+    fn rate_limit_without_detail_preserves_problem_type() {
+        let error = request_error(
+            429,
+            r#"{"type":"urn:ietf:params:acme:error:rateLimited"}"#,
+            None,
+        );
+        assert_eq!(
+            error.to_string(),
+            "HTTP Status 429 (Too Many Requests): urn:ietf:params:acme:error:rateLimited"
+        );
+    }
+
+    #[test]
+    fn malformed_rate_limit_body_keeps_status_and_retry_after() {
+        for body in ["not JSON", "", r#"{"detail":123}"#] {
+            let error = request_error(429, body, Some("60"));
+            assert!(
+                matches!(error, AcmeError::RateLimited { retry_after: Some(duration), problem: None } if duration == Duration::from_secs(60))
+            );
+            assert_eq!(
+                error.to_string(),
+                "HTTP Status 429 (Too Many Requests) (Retry-After: 60s)"
+            );
+        }
+    }
+
+    #[test]
+    fn non_rate_limit_status_is_unchanged() {
+        let error = request_error(409, r#"{"detail":"Already processing"}"#, Some("120"));
+        assert!(matches!(error, AcmeError::HttpStatus(409)));
+    }
 
     #[test]
     fn delta_seconds_parses() {
@@ -108,24 +223,15 @@ mod tests {
 
     #[test]
     fn http_date_in_future_yields_positive_duration() {
-        // Round-trip through `httpdate::fmt_http_date` so the test isn't
-        // tied to a hard-coded date whose weekday could drift; the
-        // parser is strict about day-of-week matching the date.
         let target = SystemTime::now() + Duration::from_secs(3600);
         let header = httpdate::fmt_http_date(target);
-        let parsed = parse_retry_after(&header)
-            .expect("formatted future HTTP-date should parse");
-        // We don't pin the exact value (it depends on "now" inside
-        // `parse_retry_after`), just bracket it generously.
+        let parsed = parse_retry_after(&header).expect("formatted future HTTP-date should parse");
         assert!(parsed > Duration::from_secs(60 * 30));
         assert!(parsed <= Duration::from_secs(3600));
     }
 
     #[test]
     fn http_date_in_past_resolves_to_zero() {
-        // RFC 7231 permits a date in the past. We treat that as "you can
-        // retry now" — `Some(Duration::ZERO)` — distinct from `None`,
-        // which means the server didn't supply a cooldown at all.
         let past = SystemTime::now() - Duration::from_secs(3600);
         let header = httpdate::fmt_http_date(past);
         assert_eq!(parse_retry_after(&header), Some(Duration::ZERO));
@@ -135,8 +241,6 @@ mod tests {
     fn unparseable_returns_none() {
         assert_eq!(parse_retry_after("not a date"), None);
         assert_eq!(parse_retry_after(""), None);
-        // Negative integers are not delta-seconds (which is non-negative)
-        // and aren't HTTP-dates either.
         assert_eq!(parse_retry_after("-1"), None);
     }
 }
